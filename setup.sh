@@ -10,11 +10,29 @@ then
   exit 1
 fi
 
-if [[ "$OSTYPE" != "linux-gnu" ]] || [[ "$(uname -m)" != "x86_64" ]]
+if [[ "$OSTYPE" != "linux-gnu" ]]
 then
-  echo "[-] Installation requires 64-bit Linux"
+  echo "[-] Installation requires Linux"
   exit 1
 fi
+
+# Detect system architecture
+ARCH=$(uname -m)
+case $ARCH in
+    x86_64)
+        echo "[*] Detected x86_64 architecture"
+        ARCH_SUFFIX="amd64"
+        ;;
+    aarch64|arm64)
+        echo "[*] Detected ARM64 architecture"
+        ARCH_SUFFIX="arm64"
+        ;;
+    *)
+        echo "[-] Unsupported architecture: $ARCH"
+        echo "[-] This script supports x86_64 and ARM64 architectures only"
+        exit 1
+        ;;
+esac
 
 for arg in "$@"
 do
@@ -49,6 +67,7 @@ fi
 
 echo "[*] INSTALLING DEPENDENCIES IN \"$toolsDir\"..."
 echo "[!] NOTE: INSTALLATION HAS BEEN TESTED ON UBUNTU ONLY. RESULTS MAY VARY FOR OTHER DISTRIBUTIONS."
+echo "[*] DETECTED ARCHITECTURE: $ARCH ($ARCH_SUFFIX)"
 
 baseDir=$PWD
 username="$(logname 2>/dev/null || echo root)"
@@ -64,18 +83,30 @@ apt-get install -y xvfb dnsutils nmap python3 python2 python3-pip curl wget unzi
 rm -rf /var/lib/apt/lists/*
 
 # Chrome (for aquatone)
-wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-apt update -qq
-apt install ./google-chrome-stable_current_amd64.deb -y >/dev/null
-rm google-chrome-stable_current_amd64.deb
+if [[ "$ARCH_SUFFIX" == "amd64" ]]; then
+    wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+    apt update -qq
+    apt install ./google-chrome-stable_current_amd64.deb -y >/dev/null
+    rm google-chrome-stable_current_amd64.deb
+elif [[ "$ARCH_SUFFIX" == "arm64" ]]; then
+    # For ARM64, we'll use Chromium which has better ARM support
+    echo "[*] Installing Chromium for ARM64..."
+    apt install -y chromium-browser >/dev/null
+fi
 
 # Golang
 go version &> /dev/null
 if [ $? -ne 0 ]; then
     echo "[*] Installing Golang..."
-    wget -q https://golang.org/dl/go1.24.2.linux-amd64.tar.gz
-    tar -xvf go1.24.2.linux-amd64.tar.gz -C /usr/local >/dev/null
-    rm -rf ./go1.24.2.linux-amd64.tar.gz >/dev/null
+    if [[ "$ARCH_SUFFIX" == "amd64" ]]; then
+        wget -q https://golang.org/dl/go1.24.2.linux-amd64.tar.gz
+        tar -xvf go1.24.2.linux-amd64.tar.gz -C /usr/local >/dev/null
+        rm -rf ./go1.24.2.linux-amd64.tar.gz >/dev/null
+    elif [[ "$ARCH_SUFFIX" == "arm64" ]]; then
+        wget -q https://golang.org/dl/go1.24.2.linux-arm64.tar.gz
+        tar -xvf go1.24.2.linux-arm64.tar.gz -C /usr/local >/dev/null
+        rm -rf ./go1.24.2.linux-arm64.tar.gz >/dev/null
+    fi
     export GOROOT="/usr/local/go"
     export GOPATH="$homeDir/go"
     export PATH="$PATH:${GOPATH}/bin:${GOROOT}/bin:${PATH}"
@@ -100,16 +131,26 @@ nuclei -update-templates -update-template-dir $toolsDir/nuclei-templates &>/dev/
 
 # PhantomJS (removed from  Kali packages)
 echo "[*] Installing PhantomJS..."
-wget -q https://bitbucket.org/ariya/phantomjs/downloads/phantomjs-2.1.1-linux-x86_64.tar.bz2
-tar xvf phantomjs-2.1.1-linux-x86_64.tar.bz2 >/dev/null
-rm phantomjs-2.1.1-linux-x86_64.tar.bz2
-cp $toolsDir/phantomjs-2.1.1-linux-x86_64/bin/phantomjs /usr/bin/phantomjs
+if [[ "$ARCH_SUFFIX" == "amd64" ]]; then
+    wget -q https://bitbucket.org/ariya/phantomjs/downloads/phantomjs-2.1.1-linux-x86_64.tar.bz2
+    tar xvf phantomjs-2.1.1-linux-x86_64.tar.bz2 >/dev/null
+    rm phantomjs-2.1.1-linux-x86_64.tar.bz2
+    cp $toolsDir/phantomjs-2.1.1-linux-x86_64/bin/phantomjs /usr/bin/phantomjs
+elif [[ "$ARCH_SUFFIX" == "arm64" ]]; then
+    # PhantomJS doesn't have official ARM64 builds, so we'll skip it or use an alternative
+    echo "[!] PhantomJS doesn't support ARM64 officially. Skipping PhantomJS installation."
+    echo "[!] Consider using headless Chrome/Chromium instead for ARM64 systems."
+fi
 
 # Aquatone
 echo "[*] Installing Aquatone"
-wget -q https://github.com/michenriksen/aquatone/releases/download/v1.7.0/aquatone_linux_amd64_1.7.0.zip
-unzip -j aquatone_linux_amd64_1.7.0.zip -d /usr/bin/ aquatone >/dev/null
-rm aquatone_linux_amd64_1.7.0.zip
+wget -q https://github.com/michenriksen/aquatone/releases/download/v1.7.0/aquatone_linux_${ARCH_SUFFIX}_1.7.0.zip
+if [[ -f "aquatone_linux_${ARCH_SUFFIX}_1.7.0.zip" ]]; then
+    unzip -j aquatone_linux_${ARCH_SUFFIX}_1.7.0.zip -d /usr/bin/ aquatone >/dev/null
+    rm aquatone_linux_${ARCH_SUFFIX}_1.7.0.zip
+else
+    echo "[!] Aquatone release not found for ${ARCH_SUFFIX} architecture. Skipping Aquatone installation."
+fi
 
 # Subjack fingerprints file
 echo "[*] Installing Subjack fingerprints..."
@@ -123,17 +164,34 @@ wget -q https://raw.githubusercontent.com/Bo0oM/fuzz.txt/master/fuzz.txt -O $too
 
 # HTTPX
 echo "[*] Installing HTTPX..."
-wget -q https://github.com/projectdiscovery/httpx/releases/download/v1.6.10/httpx_1.6.10_linux_amd64.zip
-unzip -j httpx_1.6.10_linux_amd64.zip -d /usr/bin/ httpx >/dev/null
-rm httpx_1.6.10_linux_amd64.zip
+wget -q https://github.com/projectdiscovery/httpx/releases/download/v1.6.10/httpx_1.6.10_linux_${ARCH_SUFFIX}.zip
+if [[ -f "httpx_1.6.10_linux_${ARCH_SUFFIX}.zip" ]]; then
+    unzip -j httpx_1.6.10_linux_${ARCH_SUFFIX}.zip -d /usr/bin/ httpx >/dev/null
+    rm httpx_1.6.10_linux_${ARCH_SUFFIX}.zip
+else
+    echo "[!] HTTPX release not found for ${ARCH_SUFFIX} architecture. Skipping HTTPX installation."
+fi
 
 # Amass
 echo "[*] Installing Amass..."
-wget -q https://github.com/owasp-amass/amass/releases/download/v4.2.0/amass_Linux_amd64.zip
-unzip -q amass_Linux_amd64.zip
-mv amass_Linux_amd64 amass
-rm amass_Linux_amd64.zip
-cp $toolsDir/amass/amass /usr/bin/amass
+if [[ "$ARCH_SUFFIX" == "amd64" ]]; then
+    wget -q https://github.com/owasp-amass/amass/releases/download/v4.2.0/amass_Linux_amd64.zip
+    unzip -q amass_Linux_amd64.zip
+    mv amass_Linux_amd64 amass
+    rm amass_Linux_amd64.zip
+elif [[ "$ARCH_SUFFIX" == "arm64" ]]; then
+    wget -q https://github.com/owasp-amass/amass/releases/download/v4.2.0/amass_Linux_arm64.zip
+    if [[ -f "amass_Linux_arm64.zip" ]]; then
+        unzip -q amass_Linux_arm64.zip
+        mv amass_Linux_arm64 amass
+        rm amass_Linux_arm64.zip
+    else
+        echo "[!] Amass release not found for ARM64 architecture. Skipping Amass installation."
+    fi
+fi
+if [[ -d "$toolsDir/amass" ]]; then
+    cp $toolsDir/amass/amass /usr/bin/amass
+fi
 
 # Gf-patterns
 echo "[*] Installing Gf-patterns..."
@@ -143,9 +201,19 @@ cp "$toolsDir"/Gf-Patterns/*.json "$homeDir"/.gf
 
 # nrich
 echo "[*] Installing nrich..."
-wget -q https://gitlab.com/api/v4/projects/33695681/packages/generic/nrich/latest/nrich_latest_amd64.deb
-dpkg -i nrich_latest_amd64.deb &>/dev/null
-rm nrich_latest_amd64.deb
+if [[ "$ARCH_SUFFIX" == "amd64" ]]; then
+    wget -q https://gitlab.com/api/v4/projects/33695681/packages/generic/nrich/latest/nrich_latest_amd64.deb
+    dpkg -i nrich_latest_amd64.deb &>/dev/null
+    rm nrich_latest_amd64.deb
+elif [[ "$ARCH_SUFFIX" == "arm64" ]]; then
+    wget -q https://gitlab.com/api/v4/projects/33695681/packages/generic/nrich/latest/nrich_latest_arm64.deb
+    if [[ -f "nrich_latest_arm64.deb" ]]; then
+        dpkg -i nrich_latest_arm64.deb &>/dev/null
+        rm nrich_latest_arm64.deb
+    else
+        echo "[!] nrich release not found for ARM64 architecture. Skipping nrich installation."
+    fi
+fi
 
 # Persist configured environment variables via global profile.d script
 echo "[*] Setting environment variables..."
