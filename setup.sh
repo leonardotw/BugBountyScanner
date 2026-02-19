@@ -71,7 +71,12 @@ echo "[*] DETECTED ARCHITECTURE: $ARCH ($ARCH_SUFFIX)"
 
 baseDir=$PWD
 username="$(logname 2>/dev/null || echo root)"
-homeDir=$(eval echo "~$username")
+# Safer home dir expansion
+homeDir=$(getent passwd "$username" | cut -d: -f6)
+# Fallback if getent fails or returns empty (e.g. inside some minimal containers)
+if [ -z "$homeDir" ]; then
+    homeDir="$HOME"
+fi
 
 mkdir -p "$toolsDir"
 cd "$toolsDir" || { echo "Something went wrong"; exit 1; }
@@ -79,20 +84,16 @@ cd "$toolsDir" || { echo "Something went wrong"; exit 1; }
 # Various apt packages
 echo "[*] Running apt update and installing apt-based packages, this may take a while..."
 apt-get update >/dev/null
-apt-get install -y xvfb dnsutils nmap python3 python2 python3-pip curl wget unzip git libfreetype6 libfontconfig1 >/dev/null
+apt-get install -y xvfb dnsutils nmap python3 python3-pip curl wget unzip git libfreetype6 libfontconfig1 >/dev/null
 rm -rf /var/lib/apt/lists/*
 
-# Chrome (for aquatone)
-if [[ "$ARCH_SUFFIX" == "amd64" ]]; then
-    wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-    apt update -qq
-    apt install ./google-chrome-stable_current_amd64.deb -y >/dev/null
-    rm google-chrome-stable_current_amd64.deb
-elif [[ "$ARCH_SUFFIX" == "arm64" ]]; then
-    # For ARM64, we'll use Chromium which has better ARM support
-    echo "[*] Installing Chromium for ARM64..."
-    apt install -y chromium-browser >/dev/null
+# Chromium (for gowitness/katana) is installed via apt in Dockerfile or below
+if ! command -v chromium &> /dev/null && ! command -v chromium-browser &> /dev/null; then
+    echo "[*] Installing Chromium..."
+    apt-get update >/dev/null
+    apt-get install -y chromium >/dev/null
 fi
+
 
 # Golang
 go version &> /dev/null
@@ -121,6 +122,11 @@ export GO111MODULE="on"
 go install github.com/lc/gau@latest &>/dev/null
 go install github.com/tomnomnom/gf@latest &>/dev/null
 go install github.com/jaeles-project/gospider@latest &>/dev/null
+go install github.com/projectdiscovery/katana/cmd/katana@latest &>/dev/null
+go install github.com/sensepost/gowitness@latest &>/dev/null
+go install github.com/projectdiscovery/naabu/v2/cmd/naabu@latest &>/dev/null
+go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest &>/dev/null
+go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest &>/dev/null
 go install github.com/tomnomnom/qsreplace@latest &>/dev/null
 go install github.com/haccer/subjack@latest &>/dev/null
 go install github.com/ffuf/ffuf/v2@latest &>/dev/null
@@ -129,28 +135,30 @@ go install github.com/projectdiscovery/nuclei/v2/cmd/nuclei@latest &>/dev/null
 # Nuclei-templates
 nuclei -update-templates -update-template-dir $toolsDir/nuclei-templates &>/dev/null
 
-# PhantomJS (removed from  Kali packages)
-echo "[*] Installing PhantomJS..."
-if [[ "$ARCH_SUFFIX" == "amd64" ]]; then
-    wget -q https://bitbucket.org/ariya/phantomjs/downloads/phantomjs-2.1.1-linux-x86_64.tar.bz2
-    tar xvf phantomjs-2.1.1-linux-x86_64.tar.bz2 >/dev/null
-    rm phantomjs-2.1.1-linux-x86_64.tar.bz2
-    cp $toolsDir/phantomjs-2.1.1-linux-x86_64/bin/phantomjs /usr/bin/phantomjs
-elif [[ "$ARCH_SUFFIX" == "arm64" ]]; then
-    # PhantomJS doesn't have official ARM64 builds, so we'll skip it or use an alternative
-    echo "[!] PhantomJS doesn't support ARM64 officially. Skipping PhantomJS installation."
-    echo "[!] Consider using headless Chrome/Chromium instead for ARM64 systems."
-fi
+# Custom Nuclei Templates
+echo "[*] Cloning Custom Nuclei Templates..."
+mkdir -p "$toolsDir/custom-nuclei-templates"
+git clone https://github.com/geeknik/the-nuclei-templates.git "$toolsDir/custom-nuclei-templates/geeknik"
+git clone https://github.com/h0tak88r/nuclei_templates.git "$toolsDir/custom-nuclei-templates/h0tak88r"
 
-# Aquatone
-echo "[*] Installing Aquatone"
-wget -q https://github.com/michenriksen/aquatone/releases/download/v1.7.0/aquatone_linux_${ARCH_SUFFIX}_1.7.0.zip
-if [[ -f "aquatone_linux_${ARCH_SUFFIX}_1.7.0.zip" ]]; then
-    unzip -j aquatone_linux_${ARCH_SUFFIX}_1.7.0.zip -d /usr/bin/ aquatone >/dev/null
-    rm aquatone_linux_${ARCH_SUFFIX}_1.7.0.zip
-else
-    echo "[!] Aquatone release not found for ${ARCH_SUFFIX} architecture. Skipping Aquatone installation."
-fi
+
+# Setup Rust
+echo "[*] Installing Rust..."
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+
+# Enumrust
+echo "[*] Installing Enumrust..."
+# Creating a temp dir for cloning
+mkdir -p "$toolsDir/enumrust_src"
+git clone https://github.com/StartDemocracy/enumrust.git "$toolsDir/enumrust_src"
+cd "$toolsDir/enumrust_src" || echo "Failed to cd to enumrust_src"
+cargo build --release
+cp target/release/enumrust /usr/local/bin/
+cd "$toolsDir"
+rm -rf "$toolsDir/enumrust_src"
+
+
 
 # Subjack fingerprints file
 echo "[*] Installing Subjack fingerprints..."
@@ -222,7 +230,9 @@ then
     { echo "export GOROOT=/usr/local/go";
     echo "export GOPATH=$homeDir/go";
     echo 'export PATH=$PATH:$GOPATH/bin:$GOROOT/bin';
-    echo "export GO111MODULE=on"; } >> "$homeDir"/.bashrc
+    echo "export GO111MODULE=on"; 
+    echo 'export PATH=$PATH:$HOME/.cargo/bin'; } >> "$homeDir"/.bashrc
+    source "$homeDir"/.bashrc
 fi
 
 if [ -f "$homeDir"/.zshrc ]
@@ -230,7 +240,8 @@ then
     { echo "export GOROOT=/usr/local/go";
     echo "export GOPATH=$homeDir/go";
     echo 'export PATH=$PATH:$GOPATH/bin:$GOROOT/bin';
-    echo "export GO111MODULE=on"; } >> "$homeDir"/.zshrc
+    echo "export GO111MODULE=on";
+    echo 'export PATH=$PATH:$HOME/.cargo/bin'; } >> "$homeDir"/.zshrc
 fi
 
 # Cleanup

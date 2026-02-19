@@ -9,7 +9,7 @@ thorough=true
 notify=true
 overwrite=false
 
-source "./utils/screenshotReport.sh"
+# source "./utils/screenshotReport.sh"
 
 function notify {
     if [ "$notify" = true ]
@@ -23,9 +23,9 @@ function notify {
         # Format string to escape special characters and send message through Telegram API.
         if [ -z "$DOMAIN" ]
         then
-            message=`echo -ne "*BugBountyScanner:* $1" | sed 's/[^a-zA-Z 0-9*_]/\\\\&/g'`
+            message=$(echo -ne "*BugBountyScanner:* $1" | sed 's/[^a-zA-Z 0-9*_]/\\\\&/g')
         else
-            message=`echo -ne "*BugBountyScanner [$DOMAIN]:* $1" | sed 's/[^a-zA-Z 0-9*_]/\\\\&/g'`
+            message=$(echo -ne "*BugBountyScanner [$DOMAIN]:* $1" | sed 's/[^a-zA-Z 0-9*_]/\\\\&/g')
         fi
     
         curl -s -X POST "https://api.telegram.org/bot$telegram_api_key/sendMessage" -d chat_id="$telegram_chat_id" -d text="$message" -d parse_mode="MarkdownV2" &> /dev/null
@@ -140,7 +140,7 @@ notify "Starting recon on *${#DOMAINS[@]}* domains."
 for DOMAIN in "${DOMAINS[@]}"
 do
     mkdir -p "$DOMAIN"
-    cd "$DOMAIN" || { echo "Something went wrong"; exit 1; }
+    cd "$DOMAIN" || { echo "Something went wrong entering $DOMAIN directory"; exit 1; }
 
     cp -r "$scriptDir/dist" .
 
@@ -150,19 +150,29 @@ do
     if [ ! -f "domains-$DOMAIN.txt" ] || [ "$overwrite" = true ]
     then
         echo "[*] RUNNING AMASS..."
-        amass enum --passive -d "$DOMAIN" -o "domains-$DOMAIN.txt"
-        notify "Amass completed! Identified *$(wc -l < "domains-$DOMAIN.txt")* subdomains. Resolving IP addresses..."
+        amass enum --passive -d "$DOMAIN" -o "domains-amass-$DOMAIN.txt"
+        
+        echo "[*] RUNNING ENUMRUST..."
+        enumrust -d "$DOMAIN" -o "domains-enumrust-$DOMAIN.txt"
+        if [ ! -f "domains-enumrust-$DOMAIN.txt" ]; then
+             # Fallback if enumrust doesn't output to file directly or requires stdout redirection
+             enumrust -d "$DOMAIN" > "domains-enumrust-$DOMAIN.txt"
+        fi
+
+        # Merge results
+        cat "domains-amass-$DOMAIN.txt" "domains-enumrust-$DOMAIN.txt" 2>/dev/null | sort -u > "domains-$DOMAIN.txt"
+        rm -f "domains-amass-$DOMAIN.txt" "domains-enumrust-$DOMAIN.txt"
+
+        notify "Subdomain enumeration completed! Identified *$(wc -l < "domains-$DOMAIN.txt")* subdomains. Resolving IP addresses..."
     else
-        echo "[-] SKIPPING AMASS"
+        echo "[-] SKIPPING SUBDOMAIN ENUMERATION"
     fi
 
     if [ ! -f "ip-addresses-$DOMAIN.txt" ] || [ "$overwrite" = true ]
     then
         echo "[*] RESOLVING IP ADDRESSES FROM HOSTS..."
-        while read -r hostname; do
-            dig "$hostname" +short >> "dig.txt"
-        done < "domains-$DOMAIN.txt"
-        grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}' "dig.txt" | sort -u > "ip-addresses-$DOMAIN.txt" && rm "dig.txt"
+        # Using dnsx for faster resolution
+        dnsx -l "domains-$DOMAIN.txt" -a -resp-only -silent | sort -u > "ip-addresses-$DOMAIN.txt"
         notify "Resolving done! Enriching *$(wc -l < "ip-addresses-$DOMAIN.txt")* IP addresses with Shodan data..."
     else
         echo "[-] SKIPPING RESOLVING HOST IP ADDRESSES"
@@ -204,14 +214,15 @@ do
         echo "[-] SKIPPING SUBJACK"
     fi
 
-    if [ ! -f "aquatone_report.html" ] || [ "$overwrite" = true ]
+    if [ ! -f "gowitness/report.html" ] || [ "$overwrite" = true ]
     then
-        echo "[*] RUNNING AQUATONE..."
-        cat livedomains-$DOMAIN.txt | aquatone -ports medium
-        generate_screenshot_report "$DOMAIN"
-        notify "Aquatone completed! Took *$(find screenshots/* -maxdepth 0 | wc -l)* screenshots. Getting Wayback Machine path list with GAU..."
+        echo "[*] RUNNING GOWITNESS..."
+        # Gowitness requires a chrome/chromium install. setup.sh ensures chromium-browser is present.
+        gowitness file -f "livedomains-$DOMAIN.txt" --threads 4 --screenshot-path screenshots --disable-logging
+        gowitness report export -f report.html
+        notify "Gowitness completed! Report generated. Getting Wayback Machine path list with GAU..."
     else
-        echo "[-] SKIPPING AQUATONE"
+        echo "[-] SKIPPING GOWITNESS"
     fi
 
     if [ ! -f "WayBack-$DOMAIN.txt" ] || [ "$overwrite" = true ]
@@ -231,7 +242,8 @@ do
         then
             echo "[*] RUNNING NUCLEI..."
             notify "Detecting known vulnerabilities with Nuclei..."
-            nuclei -c 150 -l "livedomains-$DOMAIN.txt" -severity low,medium,high,critical -etags "intrusive" -o "nuclei-$DOMAIN.txt"
+            # Include custom templates directory
+            nuclei -c 150 -l "livedomains-$DOMAIN.txt" -t "$toolsDir/nuclei-templates" -t "$toolsDir/custom-nuclei-templates" -severity low,medium,high,critical -etags "intrusive" -o "nuclei-$DOMAIN.txt"
             
             if [ -f "nuclei-$DOMAIN.txt" ]
             then
@@ -288,23 +300,24 @@ do
 
         if [ ! -f "paths-$DOMAIN.txt" ] || [ "$overwrite" = true ]
         then
-            echo "[*] RUNNING GOSPIDER..."
-            # Spider for unique URLs, filter duplicate parameters
-            gospider -S "livedomains-$DOMAIN.txt" -o GoSpider -t 2 -c 4 -d 3 -m 3 --no-redirect --blacklist jpg,jpeg,gif,css,tif,tiff,png,ttf,woff,woff2,ico,svg
-            cat GoSpider/* | grep -o -E "(([a-zA-Z][a-zA-Z0-9+-.]*\:\/\/)|mailto|data\:)([a-zA-Z0-9\.\&\/\?\:@\+-\_=#%;,])*" | sort -u | qsreplace -a | grep "$DOMAIN" > "tmp-GoSpider-$DOMAIN.txt"
-            rm -rf GoSpider
-            notify "GoSpider completed. Crawled *$(wc -l < "tmp-GoSpider-$DOMAIN.txt")* endpoints. Getting interesting endpoints and parameters..."
+            echo "[*] RUNNING KATANA..."
+            # Spider for unique URLs
+            katana -list "livedomains-$DOMAIN.txt" -o "katana-$DOMAIN.txt" -jc -kf all -c 10 -d 3
+            
+            cat "katana-$DOMAIN.txt" | grep -o -E "(([a-zA-Z][a-zA-Z0-9+-.]*\:\/\/)|mailto|data\:)([a-zA-Z0-9\.\&\/\?\:@\+-\_=#%;,])*" | sort -u | qsreplace -a | grep "$DOMAIN" > "tmp-Katana-$DOMAIN.txt"
+            rm "katana-$DOMAIN.txt"
+            notify "Katana completed. Crawled *$(wc -l < "tmp-Katana-$DOMAIN.txt")* endpoints. Getting interesting endpoints and parameters..."
 
-            ## Enrich GoSpider list with parameters from GAU/WayBack. Disregard new GAU endpoints to prevent clogging with unreachable endpoints (See Issue #24).
-            # Get only endpoints from GoSpider list (assumed to be live), disregard parameters, and append ? for grepping
-            sed "s/\?.*//" "tmp-GoSpider-$DOMAIN.txt" | sort -u | sed -e 's/$/\?/' > "tmp-LivePathsQuery-$DOMAIN.txt"
-            # Find common endpoints containing (hopefully new and interesting) parameters from GAU/Wayback list
+            ## Enrich Katana list with parameters from GAU/WayBack.
+            # Get only endpoints from Katana list
+            sed "s/\?.*//" "tmp-Katana-$DOMAIN.txt" | sort -u | sed -e 's/$/\?/' > "tmp-LivePathsQuery-$DOMAIN.txt"
+            # Find common endpoints containing parameters from GAU/Wayback list
             grep -f "tmp-LivePathsQuery-$DOMAIN.txt" "WayBack-$DOMAIN.txt" > "tmp-LiveWayBack-$DOMAIN.txt"
-            # Merge new parameters with GoSpider list and get only unique endpoints
-            cat "tmp-LiveWayBack-$DOMAIN.txt" "tmp-GoSpider-$DOMAIN.txt" | sort -u | qsreplace -a > "paths-$DOMAIN.txt"
-            rm "tmp-LivePathsQuery-$DOMAIN.txt" "tmp-LiveWayBack-$DOMAIN.txt" "tmp-GoSpider-$DOMAIN.txt"
+            # Merge new parameters with Katana list
+            cat "tmp-LiveWayBack-$DOMAIN.txt" "tmp-Katana-$DOMAIN.txt" | sort -u | qsreplace -a > "paths-$DOMAIN.txt"
+            rm "tmp-LivePathsQuery-$DOMAIN.txt" "tmp-LiveWayBack-$DOMAIN.txt" "tmp-Katana-$DOMAIN.txt"
         else
-            echo "[-] SKIPPING GOSPIDER"
+            echo "[-] SKIPPING KATANA"
         fi
 
         if [ ! -d "check-manually" ] || [ "$overwrite" = true ]
@@ -356,6 +369,7 @@ do
         if [ ! -f "potential-or.txt" ] || [ "$overwrite" = true ]
         then
             echo "[*] TESTING FOR OPEN REDIRECTS..."
+            # qsreplace with known safe placeholder
             qsreplace "https://www.testing123.com" < "check-manually/open-redirect.txt" | \
             xargs -I % -P 100 sh -c 'curl -s "%" 2>&1 | grep -q "Location: https://www.testing123.com" && echo "[+] Found endpoint likely to be vulnerable to OR: %" && echo "%" >> potential-or.txt'
             if [ -f "potential-or.txt" ]; then
